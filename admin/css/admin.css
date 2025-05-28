@@ -1,0 +1,125 @@
+/**
+ * Admin styles
+ */
+/* Existing styles */
+.dd-github-repositories {
+    margin-top: 20px;
+}
+
+.dd-github-add-repo {
+    background: #fff;
+    border: 1px solid #ccd0d4;
+    padding: 15px;
+    margin-top: 10px;
+}
+
+#connection_status {
+    margin-left: 10px;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+#connection_status .testing {
+    color: #666;
+}
+
+#connection_status .success {
+    color: #46b450;
+}
+
+#connection_status .error {
+    color: #dc3232;
+}
+
+#dd-github-repos-table {
+    margin-top: 10px;
+}
+
+.github-permissions-list {
+    margin-left: 20px;
+    list-style-type: disc;
+}
+
+.github-permissions-list li {
+    margin-bottom: 5px;
+}
+
+/* New installation styles */
+.dd-github-search-repo {
+    margin-top: 20px;
+    background: #fff;
+    border: 1px solid #ccd0d4;
+    padding: 15px;
+    margin-bottom: 20px;
+}
+
+.dd-github-repo-details {
+    background: #fff;
+    border: 1px solid #ccd0d4;
+    padding: 15px;
+}
+
+.dd-github-repo-header {
+    margin-bottom: 15px;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 10px;
+}
+
+.dd-github-repo-header h3 {
+    margin-top: 0;
+    margin-bottom: 5px;
+}
+
+.dd-github-repo-meta {
+    margin-bottom: 20px;
+}
+
+.dd-github-repo-actions {
+    background: #f9f9f9;
+    border: 1px solid #eee;
+    padding: 15px;
+    margin-bottom: 20px;
+}
+
+.dd-github-repo-notes {
+    border-top: 1px solid #eee;
+    padding-top: 15px;
+}
+
+#install-status {
+    margin-left: 10px;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+#install-status .installing {
+    color: #666;
+}
+
+#install-status .success {
+    color: #46b450;
+}
+
+#install-status .error {
+    color: #dc3232;
+}
+
+.type-options {
+    margin-left: 20px;
+    padding: 10px;
+    background: #f9f9f9;
+    border-left: 4px solid #ccd0d4;
+}
+
+.dd-github-diagnostic {
+    margin: 20px 0;
+    padding: 15px;
+    background: #f7f7f7;
+    border-left: 4px solid #0073aa;
+}
+
+#github-connection-status {
+    margin-left: 10px;
+    display: inline-block;
+    vertical-align: middle;
+}
