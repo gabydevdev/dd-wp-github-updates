@@ -20,7 +20,9 @@ class DD_GitHub_Installer {
      *
      * @var DD_GitHub_API
      */
-    private $api;    /**
+    private $api;
+
+    /**
      * Constructor
      */
     public function __construct() {
@@ -28,7 +30,12 @@ class DD_GitHub_Installer {
         require_once ABSPATH . 'wp-includes/formatting.php';
 
         $this->api = new DD_GitHub_API();
+    }
 
+    /**
+     * Register hooks for installer functionality
+     */
+    public function register_hooks() {
         // Add AJAX handlers for installation
         add_action('wp_ajax_dd_github_search_repository', array($this, 'ajax_search_repository'));
         add_action('wp_ajax_dd_github_install_from_github', array($this, 'ajax_install_from_github'));
@@ -95,7 +102,7 @@ class DD_GitHub_Installer {
     }
 
     /**
-     * Handle AJAX install from GitHub
+     * Handle AJAX install from GitHub - Simplified approach
      */
     public function ajax_install_from_github() {
         // Verify nonce
@@ -115,6 +122,8 @@ class DD_GitHub_Installer {
         $owner = isset($_POST['owner']) ? sanitize_text_field($_POST['owner']) : '';
         $name = isset($_POST['name']) ? sanitize_text_field($_POST['name']) : '';
         $download_url = isset($_POST['download_url']) ? esc_url_raw($_POST['download_url']) : '';
+        $slug = isset($_POST['slug']) ? sanitize_title($_POST['slug']) : sanitize_title($name);
+        $activate = isset($_POST['activate']) && $_POST['activate'] === 'true';
 
         if (empty($type) || empty($owner) || empty($name)) {
             wp_send_json_error('Required parameters are missing.');
@@ -144,26 +153,40 @@ class DD_GitHub_Installer {
 
         // Initialize the WP_Filesystem
         WP_Filesystem();
+        global $wp_filesystem;        // Set destination based on type
+        $destination = ($type === 'plugin') ? WP_PLUGIN_DIR : get_theme_root();
 
-        // Set upgrader skin based on type
-        if ($type === 'plugin') {
-            $skin = new Plugin_Installer_Skin();
-            $upgrader = new Plugin_Upgrader($skin);
-            $destination = WP_PLUGIN_DIR;
+        // Create target directory
+        $target_dir = $destination . '/' . $slug;
+
+        // Check if directory already exists and is not empty
+        if ($wp_filesystem->exists($target_dir)) {
+            // Check if directory has contents
+            $dir_contents = $wp_filesystem->dirlist($target_dir);
+            if (!empty($dir_contents)) {
+                // Filter out hidden files and directories
+                $visible_contents = array_filter($dir_contents, function($item) {
+                    return substr($item['name'], 0, 1) !== '.';
+                });
+
+                if (!empty($visible_contents)) {
+                    wp_send_json_error('The directory "' . $slug . '" already exists and is not empty. Please choose a different name or remove the existing directory.');
+                    return;
+                }
+            }
+
+            // Directory exists but is empty, we can use it
+            error_log('Directory exists but is empty, proceeding with installation: ' . $target_dir);
         } else {
-            $skin = new Theme_Installer_Skin();
-            $upgrader = new Theme_Upgrader($skin);
-            $destination = get_theme_root();
-        }
-
-        // Get the proper download URL using our API class
-        $api = new DD_GitHub_API();
-
-        // Use provided download URL or get from the API
-        if (empty($download_url) || $download_url === 'undefined') {
-            error_log('Getting download URL for ' . $owner . '/' . $name);
-            $download_url = $api->get_download_url($owner, $name);
-
+            // Create the target directory
+            if (!$wp_filesystem->mkdir($target_dir, FS_CHMOD_DIR)) {
+                wp_send_json_error('Could not create directory: ' . $target_dir);
+                return;
+            }
+            error_log('Created new directory: ' . $target_dir);
+        }// Get download URL if not provided
+        if (empty($download_url)) {
+            $download_url = $this->api->get_download_url($owner, $name);
             if (is_wp_error($download_url)) {
                 wp_send_json_error('Failed to get download URL: ' . $download_url->get_error_message());
                 return;
@@ -172,278 +195,96 @@ class DD_GitHub_Installer {
 
         error_log('Using download URL: ' . $download_url);
 
-        // Download the package
-        $download_file = $api->download_file($download_url);
+        // Check if this URL requires authentication
+        if ($this->api->url_requires_auth($download_url)) {
+            error_log('GitHub Download: URL requires authentication');
 
-        if (is_wp_error($download_file)) {
-            wp_send_json_error('Failed to download package: ' . $download_file->get_error_message());
-            return;
-        }        // Unpack the package
-        $unzipped = unzip_file($download_file, $destination);
+            // Get the GitHub token to verify it exists
+            $options = get_option('dd_github_updates_settings');
+            $has_token = !empty($options['github_token']);
 
-        // Remove the temporary file after handling it
-        $keep_temp_file = false;
-
-        if (is_wp_error($unzipped)) {
-            error_log('Failed to unpack package: ' . $unzipped->get_error_message());
-
-            // Enhanced error diagnosis
-            if (file_exists($download_file)) {
-                $file_size = filesize($download_file);
-                error_log('Downloaded file size: ' . $file_size . ' bytes');
-
-                // Check if file is a valid ZIP
-                if (class_exists('ZipArchive')) {
-                    $zip = new ZipArchive();
-                    $result = $zip->open($download_file, ZipArchive::CHECKCONS);
-                    if ($result === TRUE) {
-                        error_log('ZIP file appears valid. Contains ' . $zip->numFiles . ' files.');
-
-                        // List the first few files to diagnose structure
-                        $file_count = min(10, $zip->numFiles);
-                        for ($i = 0; $i < $file_count; $i++) {
-                            $file_info = $zip->statIndex($i);
-                            if ($file_info) {
-                                error_log('ZIP contains: ' . $file_info['name']);
-                            }
-                        }
-
-                        // Try to extract using ZipArchive directly
-                        error_log('Attempting extraction using ZipArchive...');
-                        if ($zip->extractTo($destination)) {
-                            error_log('ZipArchive extraction successful!');
-                            $unzipped = true; // Override the error
-                        } else {
-                            error_log('ZipArchive extraction failed with code: ' . $zip->getStatusString());
-                        }
-
-                        $zip->close();
-                    } else {
-                        error_log('ZIP file validation failed with code: ' . $result);
-
-                        // Keep the file for manual inspection if it's invalid
-                        $keep_temp_file = true;
-                        error_log('Keeping temporary file for inspection at: ' . $download_file);
-                    }
-                } else {
-                    // Check ZIP signature as fallback
-                    $handle = fopen($download_file, 'rb');
-                    if ($handle) {
-                        $signature = bin2hex(fread($handle, 4));
-                        fclose($handle);
-                        error_log('File signature: ' . $signature . ' (Should be 504b0304 for ZIP files)');
-                    }
-                }
-
-                // Try fallback extraction if the file exists and has content
-                if ($file_size > 100 && is_wp_error($unzipped)) {
-                    error_log('Attempting PclZip fallback extraction method...');
-
-                    require_once ABSPATH . 'wp-admin/includes/class-pclzip.php';
-                    $archive = new PclZip($download_file);
-                    $result = $archive->extract(PCLZIP_OPT_PATH, $destination);
-
-                    if ($result !== 0) {
-                        error_log('PclZip fallback extraction successful! Extracted ' . count($result) . ' files.');
-                        $unzipped = true; // Override the error
-                    } else {
-                        error_log('PclZip fallback extraction failed: ' . $archive->errorInfo(true));
-
-                        // Try system unzip command as last resort
-                        if (function_exists('exec')) {
-                            error_log('Attempting system unzip command...');
-                            $output = array();
-                            $return_var = 0;
-                            exec('unzip -o ' . escapeshellarg($download_file) . ' -d ' . escapeshellarg($destination) . ' 2>&1', $output, $return_var);
-
-                            error_log('System unzip output: ' . implode("\n", $output));
-
-                            if ($return_var === 0) {
-                                error_log('System unzip extraction successful!');
-                                $unzipped = true; // Override the error
-                            } else {
-                                error_log('System unzip extraction failed with code: ' . $return_var);
-                            }
-                        }
-                    }
-                }
-            } else {
-                error_log('Downloaded file not found at path: ' . $download_file);
-            }
-
-            if (is_wp_error($unzipped)) {
-                wp_send_json_error('Failed to unpack package: ' . $unzipped->get_error_message() . '. Please check your GitHub repository structure.');
-
-                // Clean up if we're not keeping the file for inspection
-                if (!$keep_temp_file && file_exists($download_file)) {
-                    @unlink($download_file);
-                }
-
+            if (!$has_token) {
+                wp_send_json_error('This repository requires a GitHub token for access. Please configure your GitHub token in the plugin settings.');
                 return;
             }
         }
 
-        // Clean up the temporary file if we don't need to keep it
-        if (!$keep_temp_file && file_exists($download_file)) {
-            @unlink($download_file);
-        }        // Determine the installed directory name
-        $temp_folder = $destination . '/' . $owner . '-' . $name . '-';
-        $folders = glob($temp_folder . '*', GLOB_ONLYDIR);
+        // Download the package using authenticated method
+        $temp_file = $this->api->download_file_authenticated($download_url);
+        if (is_wp_error($temp_file)) {
+            $error_message = $temp_file->get_error_message();
+            $error_data = $temp_file->get_error_data();
 
-        error_log('Looking for extracted folders in: ' . $temp_folder . '*');
-        error_log('Destination directory: ' . $destination);
+            // Provide more helpful error messages based on the error type
+            if (isset($error_data['code'])) {
+                switch ($error_data['code']) {
+                    case 404:
+                        $error_message = 'Repository or release not found. Please verify the repository exists and you have access to it.';
+                        break;
+                    case 401:
+                    case 403:
+                        $error_message = 'Access denied. Your GitHub token may be invalid or missing required permissions. Please check your token configuration.';
+                        break;
+                }            }
 
-        // If we can't find folders with the expected pattern, try a more general approach
-        if (empty($folders)) {
-            error_log('Standard pattern not found, trying alternative patterns...');
+            // Clean up the empty directory since download failed
+            $this->cleanup_empty_directory($target_dir);
+            wp_send_json_error('Failed to download package: ' . $error_message);
+            return;
+        }        // Extract package directly to target directory
+        error_log('Extracting package to: ' . $target_dir);
+        $unzip_result = unzip_file($temp_file, $target_dir);
 
-            // Try to find by common GitHub extraction patterns
-            $alt_patterns = array(
-                $destination . '/' . $name . '-v*',                // name-v1.0.0
-                $destination . '/' . $name . '-*',                // name-version
-                $destination . '/' . $name,                       // exact name
-                $destination . '/*' . $name . '*',                // anything with name
-                $destination . '/' . $owner . '-' . $name . '*',  // owner-name-with-suffix
-                $destination . '/' . $owner . '-' . $name,        // owner-name
-                $destination . '/' . $owner . '.' . $name,        // owner.name
-                $destination . '/*',                              // any directory
-            );
+        // Clean up the temp file
+        @unlink($temp_file);
 
-            foreach ($alt_patterns as $pattern) {
-                error_log('Trying pattern: ' . $pattern);
-                $alt_folders = glob($pattern, GLOB_ONLYDIR);
-
-                if (!empty($alt_folders)) {
-                    error_log('Found folders using pattern: ' . $pattern);
-                    foreach ($alt_folders as $folder) {
-                        error_log('Found folder: ' . $folder);
-                    }
-                    $folders = $alt_folders;
-                    break;
-                }
-            }
-
-            // List all files in destination to help diagnose the issue
-            error_log('Listing all items in destination directory:');
-            $all_items = glob($destination . '/*');
-            foreach ($all_items as $item) {
-                error_log('Item in destination: ' . $item . (is_dir($item) ? ' (dir)' : ' (file)'));
-            }
-
-            // Check if files were extracted directly to destination (flat structure)
-            // Look for key files that would indicate a theme or plugin
-            if (($type === 'theme' && file_exists($destination . '/style.css')) ||
-                ($type === 'plugin' && count(glob($destination . '/*.php')) > 0)) {
-
-                error_log('DD GitHub Updates: Found flat structure directly in destination');
-
-                // Generate a slug from the repository name
-                $suggested_slug = sanitize_title($name);
-                $slug = !empty($_POST['slug']) ? sanitize_title($_POST['slug']) : $suggested_slug;
-
-                // Manually handle the restructuring
-                $this->restructure_flat_repository(
-                    $destination,
-                    dirname($destination), // Parent directory
-                    $slug,
-                    $type
-                );
-
-                // Look for the newly created directory
-                $folders = glob($destination . '/' . $slug, GLOB_ONLYDIR);
-                if (!empty($folders)) {
-                    $installed_dir = $slug;
-                } else {
-                    wp_send_json_error('Failed to restructure the flat repository.');
-                    return;
-                }
-            } else {
-                // Create a directory ourselves if nothing was found but extraction succeeded
-                if (!is_wp_error($unzipped)) {
-                    error_log('Extraction succeeded but no directories found. Creating directory manually...');
-
-                    // Create a directory with the slug
-                    $suggested_slug = sanitize_title($name);
-                    $slug = !empty($_POST['slug']) ? sanitize_title($_POST['slug']) : $suggested_slug;
-                    $target_dir = $destination . '/' . $slug;
-
-                    if (!is_dir($target_dir)) {
-                        if (wp_mkdir_p($target_dir)) {
-                            error_log('Created directory: ' . $target_dir);
-
-                            // Move all files to the new directory
-                            $all_items = glob($destination . '/*');
-                            foreach ($all_items as $item) {
-                                if ($item != $target_dir) {
-                                    $basename = basename($item);
-                                    if (is_dir($item)) {
-                                        // Skip moving directories for now
-                                        continue;
-                                    } else {
-                                        // Move files
-                                        rename($item, $target_dir . '/' . $basename);
-                                        error_log('Moved file: ' . $basename . ' to ' . $target_dir);
-                                    }
-                                }
-                            }
-
-                            // Now move content from directories
-                            $all_dirs = glob($destination . '/*', GLOB_ONLYDIR);
-                            foreach ($all_dirs as $dir) {
-                                if ($dir != $target_dir) {
-                                    $this->recursive_copy($dir, $target_dir . '/' . basename($dir));
-                                    error_log('Copied directory: ' . basename($dir) . ' to ' . $target_dir);
-                                }
-                            }
-
-                            $folders = array($target_dir);
-                            $installed_dir = $slug;
-                        } else {
-                            error_log('Failed to create directory: ' . $target_dir);
-                        }
-                    }
-                }
-
-                if (empty($folders)) {
-                    wp_send_json_error('Failed to locate the installed package. Check WordPress error logs for details.');
-                    return;
-                }
-            }
-        } else {
-            error_log('Found folders using standard pattern:');
-            foreach ($folders as $folder) {
-                error_log('Found folder: ' . $folder);
-            }
-            $installed_dir = basename($folders[0]);
-
-            // We might need to restructure even if the directory exists
-            // if it doesn't have the expected structure
-            $source_dir = $destination . '/' . $installed_dir;
-
-            // Set this explicitly so our filter will catch it
-            add_filter('upgrader_source_selection', function($source, $remote_source, $upgrader, $args = array()) use ($source_dir, $destination, $installed_dir, $type) {
-                if ($source === $source_dir) {
-                    // Add the github_update flag to ensure our filter runs
-                    $args['github_update'] = true;
-                    $args['type'] = $type;
-                    $args['slug'] = $installed_dir;
-
-                    return $this->maybe_restructure_github_package($source, $destination, $upgrader, $args);
-                }
-                return $source;
-            }, 9, 4);
+        if (is_wp_error($unzip_result)) {
+            error_log('Unzip failed: ' . $unzip_result->get_error_message());
+            // Clean up the partially created directory
+            $wp_filesystem->rmdir($target_dir, true);
+            wp_send_json_error('Failed to extract package: ' . $unzip_result->get_error_message());
+            return;
         }
 
-        // For plugins, we need to check for the main plugin file
+        error_log('Package extracted successfully to: ' . $target_dir);
+
+        // Check if the extracted content has a subdirectory structure (common with GitHub)
+        $contents = glob($target_dir . '/*');
+        $dirs = array_filter($contents, function($item) {
+            return is_dir($item) && basename($item) !== '.' && basename($item) !== '..';
+        });
+
+        // If there's exactly one directory and minimal files in the root, it might be a GitHub repository structure
+        if (count($dirs) === 1 && count($contents) <= 3) {
+            $subdir = $dirs[0];
+            $subdir_contents = glob($subdir . '/*');
+
+            // Move all files from subdirectory to target directory
+            foreach ($subdir_contents as $item) {
+                $basename = basename($item);
+                $target = $target_dir . '/' . $basename;
+
+                // Don't overwrite existing files
+                if (file_exists($target)) {
+                    continue;
+                }
+
+                rename($item, $target);
+            }
+
+            // Remove the now-empty subdirectory
+            rmdir($subdir);
+        }
+
+        // For plugins, find the main plugin file
         if ($type === 'plugin') {
-            // Try to find the main plugin file
-            $plugin_files = glob($destination . '/' . $installed_dir . '/*.php');
             $main_file = '';
+            $plugin_files = glob($target_dir . '/*.php');
 
             foreach ($plugin_files as $file) {
                 $plugin_data = get_plugin_data($file);
                 if (!empty($plugin_data['Name'])) {
-                    $main_file = $installed_dir . '/' . basename($file);
+                    $main_file = $slug . '/' . basename($file);
                     break;
                 }
             }
@@ -453,103 +294,67 @@ class DD_GitHub_Installer {
                 return;
             }
 
-            // Activate the plugin if requested
-            if (isset($_POST['activate']) && $_POST['activate']) {
-                $activate = activate_plugin($main_file);
-
-                if (is_wp_error($activate)) {
-                    wp_send_json_error('Plugin installed but could not be activated: ' . $activate->get_error_message());
+            // Activate if requested
+            if ($activate) {
+                $activate_result = activate_plugin($main_file);
+                if (is_wp_error($activate_result)) {
+                    wp_send_json_error('Plugin installed but could not be activated: ' . $activate_result->get_error_message());
                     return;
                 }
+            }
 
-                wp_send_json_success(array(
-                    'message' => 'Plugin installed and activated successfully.',
-                    'file' => $main_file,
-                ));
-                return;
+            // Add to repository list if requested
+            if (isset($_POST['add_to_updater']) && $_POST['add_to_updater'] === 'true') {
+                $this->add_to_repository_list('plugin', $owner, $name, '', $main_file);
             }
 
             wp_send_json_success(array(
-                'message' => 'Plugin installed successfully.',
-                'file' => $main_file,
+                'message' => $activate ? 'Plugin installed and activated successfully.' : 'Plugin installed successfully.',
+                'file' => $main_file
             ));
             return;
         }
 
-        // For themes, we may need to rename the folder to match the slug
-        if ($type === 'theme' && isset($_POST['slug']) && !empty($_POST['slug'])) {
-            $slug = sanitize_text_field($_POST['slug']);
-            $new_dir = $destination . '/' . $slug;
-
-            // Rename the theme directory if needed
-            if ($installed_dir !== $slug && !file_exists($new_dir)) {
-                rename($destination . '/' . $installed_dir, $new_dir);
-                $installed_dir = $slug;
-            }
-
-            // Activate the theme if requested
-            if (isset($_POST['activate']) && $_POST['activate']) {
-                switch_theme($installed_dir);
-                wp_send_json_success(array(
-                    'message' => 'Theme installed and activated successfully.',
-                    'slug' => $installed_dir,
-                ));
+        // For themes
+        if ($type === 'theme') {
+            // Check if style.css exists
+            if (!file_exists($target_dir . '/style.css')) {
+                wp_send_json_error('Could not find the theme\'s style.css file.');
                 return;
             }
 
+            // Activate if requested
+            if ($activate) {
+                switch_theme($slug);
+            }
+
+            // Add to repository list if requested
+            if (isset($_POST['add_to_updater']) && $_POST['add_to_updater'] === 'true') {
+                $this->add_to_repository_list('theme', $owner, $name, $slug, '');
+            }
+
             wp_send_json_success(array(
-                'message' => 'Theme installed successfully.',
-                'slug' => $installed_dir,
+                'message' => $activate ? 'Theme installed and activated successfully.' : 'Theme installed successfully.',
+                'slug' => $slug
             ));
             return;
         }
 
-        wp_send_json_success(array(
-            'message' => ($type === 'plugin' ? 'Plugin' : 'Theme') . ' installed successfully.',
-            'directory' => $installed_dir,
-        ));
+        wp_send_json_error('Invalid installation type.');
     }
 
     /**
-     * Install package from GitHub
+     * Simplified GitHub package installation
      *
-     * @param array $args Installation arguments.
-     * @return bool|WP_Error True on success, WP_Error on failure.
+     * @param string $type Type of package (plugin or theme)
+     * @param string $owner Repository owner
+     * @param string $name Repository name
+     * @param string $download_url Download URL (optional)
+     * @param string $slug Desired slug (optional)
+     * @param bool $activate Whether to activate after install
+     * @return array|WP_Error Result data on success, WP_Error on failure
      */
-    public function install_from_github($args) {
-        // Verify nonce
-        if (!isset($args['nonce']) || !wp_verify_nonce($args['nonce'], 'dd_github_updates_nonce')) {
-            return new WP_Error('nonce_verification_failed', __('Security check failed', 'dd-wp-github-updates'));
-        }
-
-        // Check user capabilities
-        if (!current_user_can('install_plugins') && !current_user_can('install_themes')) {
-            return new WP_Error('insufficient_permissions', __('You do not have permission to perform this action', 'dd-wp-github-updates'));
-        }
-
-        // Get installation parameters
-        $type = isset($args['type']) ? sanitize_text_field($args['type']) : '';
-        $owner = isset($args['owner']) ? sanitize_text_field($args['owner']) : '';
-        $name = isset($args['name']) ? sanitize_text_field($args['name']) : '';
-        $download_url = isset($args['download_url']) ? esc_url_raw($args['download_url']) : '';
-
-        if (empty($type) || empty($owner) || empty($name)) {
-            return new WP_Error('missing_parameters', __('Required parameters are missing', 'dd-wp-github-updates'));
-        }
-
-        if ($type !== 'plugin' && $type !== 'theme') {
-            return new WP_Error('invalid_type', __('Invalid installation type', 'dd-wp-github-updates'));
-        }
-
-        // Check capabilities for specific type
-        if ($type === 'plugin' && !current_user_can('install_plugins')) {
-            return new WP_Error('insufficient_permissions', __('You do not have permission to install plugins', 'dd-wp-github-updates'));
-        }
-
-        if ($type === 'theme' && !current_user_can('install_themes')) {
-            return new WP_Error('insufficient_permissions', __('You do not have permission to install themes', 'dd-wp-github-updates'));
-        }
-
+    public function install_github_package($type, $owner, $name, $download_url = '', $slug = '', $activate = false) {
         // Include required files for installation
         require_once ABSPATH . 'wp-admin/includes/file.php';
         require_once ABSPATH . 'wp-admin/includes/misc.php';
@@ -557,838 +362,225 @@ class DD_GitHub_Installer {
 
         // Initialize the WP_Filesystem
         WP_Filesystem();
+        global $wp_filesystem;
 
-        // Set upgrader skin based on type
-        if ($type === 'plugin') {
-            $skin = new Plugin_Installer_Skin();
-            $upgrader = new Plugin_Upgrader($skin);
-            $destination = WP_PLUGIN_DIR;
-        } else {
-            $skin = new Theme_Installer_Skin();
-            $upgrader = new Theme_Upgrader($skin);
-            $destination = get_theme_root();
+        // Set destination based on type
+        $destination = ($type === 'plugin') ? WP_PLUGIN_DIR : get_theme_root();
+
+        // Determine slug if not provided
+        if (empty($slug)) {
+            $slug = sanitize_title($name);
         }
 
-        // Get the proper download URL using our API class
-        $api = new DD_GitHub_API();
+        // Create target directory
+        $target_dir = $destination . '/' . $slug;
 
-        // Use provided download URL or get from the API
-        if (empty($download_url) || $download_url === 'undefined') {
-            error_log('Getting download URL for ' . $owner . '/' . $name);
-            $download_url = $api->get_download_url($owner, $name);
+        // Check if directory already exists and is not empty
+        if (is_dir($target_dir) && count(glob($target_dir . '/*'))) {
+            return new WP_Error('directory_exists', sprintf(
+                __('The %s directory already exists and is not empty.', 'dd-wp-github-updates'),
+                $slug
+            ));
+        }
 
+        // Ensure target directory exists
+        if (!$wp_filesystem->exists($target_dir)) {
+            if (!$wp_filesystem->mkdir($target_dir, FS_CHMOD_DIR)) {
+                return new WP_Error('mkdir_failed', sprintf(
+                    __('Could not create directory %s.', 'dd-wp-github-updates'),
+                    $target_dir
+                ));
+            }
+        }        // Get download URL if not provided
+        if (empty($download_url)) {
+            $download_url = $this->api->get_download_url($owner, $name);
             if (is_wp_error($download_url)) {
-                return new WP_Error('download_url_error', __('Failed to get download URL: ', 'dd-wp-github-updates') . $download_url->get_error_message());
+                return $download_url;
             }
         }
 
-        error_log('Using download URL: ' . $download_url);
+        error_log('GitHub Install Package: Using download URL: ' . $download_url);
 
-        // Download the package
-        $download_file = $api->download_file($download_url);
+        // Check if this URL requires authentication
+        if ($this->api->url_requires_auth($download_url)) {
+            error_log('GitHub Install Package: URL requires authentication');
 
-        if (is_wp_error($download_file)) {
-            return new WP_Error('download_error', __('Failed to download package: ', 'dd-wp-github-updates') . $download_file->get_error_message());
-        }        // Unpack the package
-        $unzipped = unzip_file($download_file, $destination);
+            // Get the GitHub token to verify it exists
+            $options = get_option('dd_github_updates_settings');
+            $has_token = !empty($options['github_token']);
 
-        // Flag to determine if we should keep temporary files for debugging
-        $keep_temp_file = false;
-
-        if (is_wp_error($unzipped)) {
-            error_log('Failed to unpack package: ' . $unzipped->get_error_message());
-
-            // Enhanced error diagnosis
-            if (file_exists($download_file)) {
-                $file_size = filesize($download_file);
-                error_log('Downloaded file size: ' . $file_size . ' bytes');
-
-                // Check if file is a valid ZIP
-                if (class_exists('ZipArchive')) {
-                    $zip = new ZipArchive();
-                    $result = $zip->open($download_file, ZipArchive::CHECKCONS);
-                    if ($result === TRUE) {
-                        error_log('ZIP file appears valid. Contains ' . $zip->numFiles . ' files.');
-
-                        // List the first few files to diagnose structure
-                        $file_count = min(10, $zip->numFiles);
-                        for ($i = 0; $i < $file_count; $i++) {
-                            $file_info = $zip->statIndex($i);
-                            if ($file_info) {
-                                error_log('ZIP contains: ' . $file_info['name']);
-                            }
-                        }
-
-                        // Try to extract using ZipArchive directly
-                        error_log('Attempting extraction using ZipArchive...');
-                        if ($zip->extractTo($destination)) {
-                            error_log('ZipArchive extraction successful!');
-                            $unzipped = true; // Override the error
-                        } else {
-                            error_log('ZipArchive extraction failed with code: ' . $zip->getStatusString());
-                        }
-
-                        $zip->close();
-                    } else {
-                        error_log('ZIP file validation failed with code: ' . $result);
-
-                        // Keep the file for manual inspection if it's invalid
-                        $keep_temp_file = true;
-                        error_log('Keeping temporary file for inspection at: ' . $download_file);
-                    }
-                } else {
-                    // Check ZIP signature as fallback
-                    $handle = fopen($download_file, 'rb');
-                    if ($handle) {
-                        $signature = bin2hex(fread($handle, 4));
-                        fclose($handle);
-                        error_log('File signature: ' . $signature . ' (Should be 504b0304 for ZIP files)');
-                    }
-                }
-
-                // Try fallback extraction if the file exists and has content
-                if ($file_size > 100 && is_wp_error($unzipped)) {
-                    error_log('Attempting PclZip fallback extraction method...');
-
-                    require_once ABSPATH . 'wp-admin/includes/class-pclzip.php';
-                    $archive = new PclZip($download_file);
-                    $result = $archive->extract(PCLZIP_OPT_PATH, $destination);
-
-                    if ($result !== 0) {
-                        error_log('PclZip fallback extraction successful! Extracted ' . count($result) . ' files.');
-                        $unzipped = true; // Override the error
-                    } else {
-                        error_log('PclZip fallback extraction failed: ' . $archive->errorInfo(true));
-
-                        // Try system unzip command as last resort
-                        if (function_exists('exec')) {
-                            error_log('Attempting system unzip command...');
-                            $output = array();
-                            $return_var = 0;
-                            exec('unzip -o ' . escapeshellarg($download_file) . ' -d ' . escapeshellarg($destination) . ' 2>&1', $output, $return_var);
-
-                            error_log('System unzip output: ' . implode("\n", $output));
-
-                            if ($return_var === 0) {
-                                error_log('System unzip extraction successful!');
-                                $unzipped = true; // Override the error
-                            } else {
-                                error_log('System unzip extraction failed with code: ' . $return_var);
-                            }
-                        }
-                    }
-                }
-            } else {
-                error_log('Downloaded file not found at path: ' . $download_file);
-            }
-
-            if (is_wp_error($unzipped)) {
-                // Clean up if we're not keeping the file for inspection
-                if (!$keep_temp_file && file_exists($download_file)) {
-                    @unlink($download_file);
-                }
-
-                return new WP_Error('unzip_error', __('Failed to unpack package: ', 'dd-wp-github-updates') . $unzipped->get_error_message());
-            }
-        }
-
-        // Clean up the temporary file if we don't need to keep it
-        if (!$keep_temp_file && file_exists($download_file)) {
-            @unlink($download_file);
-        }        // Determine the installed directory name
-        $temp_folder = $destination . '/' . $owner . '-' . $name . '-';
-        $folders = glob($temp_folder . '*', GLOB_ONLYDIR);
-
-        error_log('Looking for extracted folders in: ' . $temp_folder . '*');
-        error_log('Destination directory: ' . $destination);
-
-        // If we can't find folders with the expected pattern, try a more general approach
-        if (empty($folders)) {
-            error_log('Standard pattern not found in non-AJAX install, trying alternative patterns...');
-
-            // Try to find by common GitHub extraction patterns
-            $alt_patterns = array(
-                $destination . '/' . $name . '-v*',                // name-v1.0.0
-                $destination . '/' . $name . '-*',                // name-version
-                $destination . '/' . $name,                       // exact name
-                $destination . '/*' . $name . '*',                // anything with name
-                $destination . '/' . $owner . '-' . $name . '*',  // owner-name-with-suffix
-                $destination . '/' . $owner . '-' . $name,        // owner-name
-                $destination . '/' . $owner . '.' . $name,        // owner.name
-                $destination . '/*',                              // any directory
-            );
-
-            foreach ($alt_patterns as $pattern) {
-                error_log('Trying pattern: ' . $pattern);
-                $alt_folders = glob($pattern, GLOB_ONLYDIR);
-
-                if (!empty($alt_folders)) {
-                    error_log('Found folders using pattern: ' . $pattern);
-                    foreach ($alt_folders as $folder) {
-                        error_log('Found folder: ' . $folder);
-                    }
-                    $folders = $alt_folders;
-                    break;
-                }
-            }
-
-            // List all files in destination to help diagnose the issue
-            error_log('Listing all items in destination directory:');
-            $all_items = glob($destination . '/*');
-            foreach ($all_items as $item) {
-                error_log('Item in destination: ' . $item . (is_dir($item) ? ' (dir)' : ' (file)'));
-            }
-
-            // Check if files were extracted directly to destination (flat structure)
-            if (($type === 'theme' && file_exists($destination . '/style.css')) ||
-                ($type === 'plugin' && count(glob($destination . '/*.php')) > 0)) {
-
-                error_log('DD GitHub Updates: Found flat structure directly in destination during non-AJAX install');
-
-                // Generate a slug from the repository name
-                $suggested_slug = sanitize_title($name);
-                $slug = !empty($args['slug']) ? sanitize_title($args['slug']) : $suggested_slug;
-
-                // Manually restructure the flat repository
-                $restructure_result = $this->restructure_flat_repository(
-                    $destination,
-                    dirname($destination), // Parent directory
-                    $slug,
-                    $type
+            if (!$has_token) {
+                return new WP_Error('auth_required',
+                    __('This repository requires a GitHub token for access. Please configure your GitHub token in the plugin settings.', 'dd-wp-github-updates')
                 );
-
-                if (is_wp_error($restructure_result)) {
-                    return $restructure_result;
-                }
-
-                // Look for the newly created directory
-                $folders = glob($destination . '/' . $slug, GLOB_ONLYDIR);
-                if (!empty($folders)) {
-                    $installed_dir = $slug;
-                } else {
-                    return new WP_Error('restructure_error', __('Failed to restructure the flat repository.', 'dd-wp-github-updates'));
-                }
-            } else {
-                // Create a directory ourselves if nothing was found but extraction succeeded
-                if (!is_wp_error($unzipped)) {
-                    error_log('Extraction succeeded but no directories found. Creating directory manually...');
-
-                    // Create a directory with the slug
-                    $suggested_slug = sanitize_title($name);
-                    $slug = !empty($args['slug']) ? sanitize_title($args['slug']) : $suggested_slug;
-                    $target_dir = $destination . '/' . $slug;
-
-                    if (!is_dir($target_dir)) {
-                        if (wp_mkdir_p($target_dir)) {
-                            error_log('Created directory: ' . $target_dir);
-
-                            // Move all files to the new directory
-                            $all_items = glob($destination . '/*');
-                            foreach ($all_items as $item) {
-                                if ($item != $target_dir) {
-                                    $basename = basename($item);
-                                    if (is_dir($item)) {
-                                        // Skip moving directories for now
-                                        continue;
-                                    } else {
-                                        // Move files
-                                        rename($item, $target_dir . '/' . $basename);
-                                        error_log('Moved file: ' . $basename . ' to ' . $target_dir);
-                                    }
-                                }
-                            }
-
-                            // Now move content from directories
-                            $all_dirs = glob($destination . '/*', GLOB_ONLYDIR);
-                            foreach ($all_dirs as $dir) {
-                                if ($dir != $target_dir) {
-                                    $this->recursive_copy($dir, $target_dir . '/' . basename($dir));
-                                    error_log('Copied directory: ' . basename($dir) . ' to ' . $target_dir);
-                                }
-                            }
-
-                            $folders = array($target_dir);
-                            $installed_dir = $slug;
-                        } else {
-                            error_log('Failed to create directory: ' . $target_dir);
-                        }
-                    }
-                }
-
-                if (empty($folders)) {
-                    return new WP_Error('installation_error', __('Failed to locate the installed package. Check WordPress error logs for details.', 'dd-wp-github-updates'));
-                }
-            }
-        } else {
-            error_log('Found folders using standard pattern:');
-            foreach ($folders as $folder) {
-                error_log('Found folder: ' . $folder);
-            }
-            $installed_dir = basename($folders[0]);
-
-            // We might need to check if the directory has the right structure
-            $source_dir = $destination . '/' . $installed_dir;
-
-            // Explicitly restructure if needed
-            $restructure_args = array(
-                'github_update' => true,
-                'type' => $type,
-                'slug' => isset($args['slug']) ? $args['slug'] : $installed_dir
-            );
-
-            $restructure_result = $this->maybe_restructure_github_package(
-                $source_dir,
-                $destination,
-                null, // No upgrader instance in this context
-                $restructure_args
-            );
-
-            if (is_wp_error($restructure_result)) {
-                return $restructure_result;
             }
         }
 
-        // For plugins, we need to check for the main plugin file
+        // Download package using authenticated method
+        $temp_file = $this->api->download_file_authenticated($download_url);
+        if (is_wp_error($temp_file)) {
+            $error_message = $temp_file->get_error_message();
+            $error_data = $temp_file->get_error_data();
+
+            // Provide more helpful error messages based on the error type
+            if (isset($error_data['code'])) {
+                switch ($error_data['code']) {
+                    case 404:
+                        $error_message = __('Repository or release not found. Please verify the repository exists and you have access to it.', 'dd-wp-github-updates');
+                        break;
+                    case 401:
+                    case 403:
+                        $error_message = __('Access denied. Your GitHub token may be invalid or missing required permissions. Please check your token configuration.', 'dd-wp-github-updates');
+                        break;
+                }
+            }
+
+            return new WP_Error('download_failed',
+                __('Failed to download package: ', 'dd-wp-github-updates') . $error_message
+            );
+        }
+
+        // Extract package directly to target directory
+        $unzip_result = unzip_file($temp_file, $target_dir);
+
+        // Clean up the temp file
+        @unlink($temp_file);
+
+        if (is_wp_error($unzip_result)) {
+            // Clean up the partially created directory
+            $wp_filesystem->rmdir($target_dir, true);
+            return new WP_Error('unzip_failed',
+                __('Failed to extract package: ', 'dd-wp-github-updates') . $unzip_result->get_error_message()
+            );
+        }
+
+        // Check if the extracted content has a subdirectory structure
+        // This happens with GitHub releases - the content is often in a subfolder
+        $contents = scandir($target_dir);
+        $has_single_dir = false;
+        $subfolder = null;
+
+        // Count non-hidden directories
+        $dirs = array_filter($contents, function($item) use ($target_dir) {
+            return $item !== '.' && $item !== '..' && is_dir($target_dir . '/' . $item) && substr($item, 0, 1) !== '.';
+        });
+
+        // If there's exactly one directory and it contains all the content, move it up
+        if (count($dirs) === 1) {
+            $subfolder = array_values($dirs)[0];
+            $subdir_path = $target_dir . '/' . $subfolder;
+
+            // Check if the subdirectory has relevant files
+            $has_relevant_files = false;
+
+            if ($type === 'theme' && file_exists($subdir_path . '/style.css')) {
+                $has_relevant_files = true;
+            } elseif ($type === 'plugin') {
+                $php_files = glob($subdir_path . '/*.php');
+                foreach ($php_files as $file) {
+                    if (strpos(file_get_contents($file), 'Plugin Name:') !== false) {
+                        $has_relevant_files = true;
+                        break;
+                    }
+                }
+            }
+
+            if ($has_relevant_files) {
+                // Move all files from subdirectory to the target directory
+                $subdir_contents = scandir($subdir_path);
+                foreach ($subdir_contents as $item) {
+                    if ($item === '.' || $item === '..') continue;
+
+                    $old_path = $subdir_path . '/' . $item;
+                    $new_path = $target_dir . '/' . $item;
+
+                    // Skip if destination already exists
+                    if ($wp_filesystem->exists($new_path)) continue;
+
+                    // Move file or directory
+                    if (is_dir($old_path)) {
+                        $wp_filesystem->move($old_path, $new_path);
+                    } else {
+                        $wp_filesystem->move($old_path, $new_path);
+                    }
+                }
+
+                // Remove the now-empty subdirectory
+                $wp_filesystem->rmdir($subdir_path);
+            }
+        }
+
+        // For plugins, find the main plugin file
         if ($type === 'plugin') {
-            // Try to find the main plugin file
-            $plugin_files = glob($destination . '/' . $installed_dir . '/*.php');
             $main_file = '';
+            $plugin_files = glob($target_dir . '/*.php');
 
             foreach ($plugin_files as $file) {
                 $plugin_data = get_plugin_data($file);
                 if (!empty($plugin_data['Name'])) {
-                    $main_file = $installed_dir . '/' . basename($file);
+                    $main_file = $slug . '/' . basename($file);
                     break;
                 }
             }
 
             if (empty($main_file)) {
-                return new WP_Error('file_error', __('Could not find the main plugin file', 'dd-wp-github-updates'));
-            }
-
-            // Activate the plugin if requested
-            if (isset($args['activate']) && $args['activate']) {
-                $activate = activate_plugin($main_file);
-
-                if (is_wp_error($activate)) {
-                    return new WP_Error('activation_error', __('Plugin installed but could not be activated: ', 'dd-wp-github-updates') . $activate->get_error_message());
-                }
-
-                return array(
-                    'success' => true,
-                    'message' => __('Plugin installed and activated successfully', 'dd-wp-github-updates'),
-                    'file' => $main_file,
+                return new WP_Error('plugin_file_not_found',
+                    __('Could not find the main plugin file.', 'dd-wp-github-updates')
                 );
             }
 
+            // Activate if requested
+            if ($activate) {
+                $activate_result = activate_plugin($main_file);
+                if (is_wp_error($activate_result)) {
+                    return new WP_Error('activation_failed',
+                        __('Plugin installed but could not be activated: ', 'dd-wp-github-updates') .
+                        $activate_result->get_error_message()
+                    );
+                }
+            }
+
             return array(
-                'success' => true,
-                'message' => __('Plugin installed successfully', 'dd-wp-github-updates'),
-                'file' => $main_file,
+                'message' => $activate ?
+                    __('Plugin installed and activated successfully.', 'dd-wp-github-updates') :
+                    __('Plugin installed successfully.', 'dd-wp-github-updates'),
+                'file' => $main_file
             );
         }
 
-        // For themes, we may need to rename the folder to match the slug
-        if ($type === 'theme' && isset($args['slug']) && !empty($args['slug'])) {
-            $slug = sanitize_text_field($args['slug']);
-            $new_dir = $destination . '/' . $slug;
-
-            // Rename the theme directory if needed
-            if ($installed_dir !== $slug && !file_exists($new_dir)) {
-                rename($destination . '/' . $installed_dir, $new_dir);
-                $installed_dir = $slug;
-            }
-
-            // Activate the theme if requested
-            if (isset($args['activate']) && $args['activate']) {
-                switch_theme($installed_dir);
-                return array(
-                    'success' => true,
-                    'message' => __('Theme installed and activated successfully', 'dd-wp-github-updates'),
-                    'slug' => $installed_dir,
+        // For themes
+        if ($type === 'theme') {
+            // Check if style.css exists
+            if (!file_exists($target_dir . '/style.css')) {
+                return new WP_Error('theme_file_not_found',
+                    __('Could not find the theme\'s style.css file.', 'dd-wp-github-updates')
                 );
             }
 
+            // Activate if requested
+            if ($activate) {
+                switch_theme($slug);
+            }
+
             return array(
-                'success' => true,
-                'message' => __('Theme installed successfully', 'dd-wp-github-updates'),
-                'slug' => $installed_dir,
+                'message' => $activate ?
+                    __('Theme installed and activated successfully.', 'dd-wp-github-updates') :
+                    __('Theme installed successfully.', 'dd-wp-github-updates'),
+                'slug' => $slug
             );
         }
 
-        // After downloading and unzipping but before WordPress processes the package
-        // This would typically be after the download_package step but before upgrader->install_package
-
-        // Add code to check if we need to restructure and then call our new function
-        if (!empty($args['slug'])) {
-            $slug = sanitize_title($args['slug']);
-        } else {
-            // Generate slug from repo name if not provided
-            $slug = sanitize_title($args['name']);
-        }
-
-        // Get the working directory and source directory of the package
-        $source = $upgrader->unpack_package($package, true);
-
-        if (is_wp_error($source)) {
-            return $source;
-        }
-
-        // Restructure if needed
-        $restructured_source = $this->restructure_flat_repository(
-            $source,
-            $upgrader->skin->get_upgrade_folder(),
-            $slug,
-            $args['type']
-        );
-
-        if (is_wp_error($restructured_source)) {
-            return $restructured_source;
-        }
-
-        // Continue with installation using our restructured source
-        // ...existing code...
-
-        wp_send_json_success(array(
-            'message' => ($type === 'plugin' ? 'Plugin' : 'Theme') . ' installed successfully.',
-            'directory' => $installed_dir,
-        ));
+        return new WP_Error('invalid_type', __('Invalid installation type.', 'dd-wp-github-updates'));
     }
 
     /**
-     * Process and restructure the downloaded package if needed
-     *
-     * @param string $package Path to the package file
-     * @param string $type Type of package (theme or plugin)
-     * @param string $slug Optional slug for renaming
-     * @return string|WP_Error Path to the processed package or WP_Error
+     * Maybe restructure GitHub package
+     * This method is kept for backward compatibility
      */
-    private function process_package($package, $type, $slug = '') {
-        // Create a temporary working directory
-        $temp_dir = get_temp_dir() . 'dd_github_' . uniqid();
-        if (!wp_mkdir_p($temp_dir)) {
-            return new WP_Error('process_package_error', 'Could not create temporary directory for processing');
-        }
-
-        // Extract the package to the temporary directory
-        $unzip_result = unzip_file($package, $temp_dir);
-        if (is_wp_error($unzip_result)) {
-            return new WP_Error('process_package_error', 'Failed to extract package: ' . $unzip_result->get_error_message());
-        }
-
-        // Check if the extracted content already has the expected WordPress structure
-        $has_structure = false;
-        $extracted_items = glob($temp_dir . '/*');
-
-        // If there's only one directory and it contains the expected files, we have proper structure
-        if (count($extracted_items) === 1 && is_dir($extracted_items[0])) {
-            if ($type === 'theme' && file_exists($extracted_items[0] . '/style.css')) {
-                $has_structure = true;
-            } elseif ($type === 'plugin' && (
-                file_exists($extracted_items[0] . '/plugin.php') ||
-                glob($extracted_items[0] . '/*.php')
-            )) {
-                $has_structure = true;
-            }
-        }
-
-        // If the structure is already correct, return the original package
-        if ($has_structure) {
-            // Clean up temporary directory
-            $this->recursive_rmdir($temp_dir);
-            return $package;
-        }
-
-        // Determine the target directory name
-        $target_dir_name = !empty($slug) ? $slug : ($type === 'theme' ? 'github-theme' : 'github-plugin');
-        $target_dir = $temp_dir . '/' . $target_dir_name;
-
-        // Create the target directory
-        if (!wp_mkdir_p($target_dir)) {
-            return new WP_Error('process_package_error', 'Could not create target directory for restructuring');
-        }
-
-        // Find all files in the temp directory (excluding our target directory)
-        $items_to_move = glob($temp_dir . '/*');
-        foreach ($items_to_move as $item) {
-            // Skip the target directory itself
-            if ($item === $target_dir) {
-                continue;
-            }
-
-            // Get just the basename
-            $basename = basename($item);
-
-            // Move the item to the target directory
-            if (is_dir($item)) {
-                $this->recursive_copy($item, $target_dir . '/' . $basename);
-            } else {
-                copy($item, $target_dir . '/' . $basename);
-            }
-        }
-
-        // Create a new ZIP file
-        $new_package = get_temp_dir() . 'dd_github_restructured_' . uniqid() . '.zip';
-
-        if (!class_exists('ZipArchive')) {
-            // Fallback to WordPress functions or command line tools
-            return new WP_Error('process_package_error', 'ZipArchive class not available for creating new package');
-        }
-
-        $zip = new ZipArchive();
-        if ($zip->open($new_package, ZipArchive::CREATE) !== true) {
-            return new WP_Error('process_package_error', 'Could not create new ZIP package');
-        }
-
-        // Add the target directory to the ZIP
-        $this->add_dir_to_zip($zip, $target_dir, $target_dir_name);
-        $zip->close();
-
-        // Verify the new ZIP was created successfully
-        if (!file_exists($new_package) || filesize($new_package) < 100) {
-            return new WP_Error('process_package_error', 'Failed to create valid ZIP package');
-        }
-
-        // Clean up the temporary directory
-        $this->recursive_rmdir($temp_dir);
-
-        // Return the path to the new package
-        return $new_package;
-    }
-
-    /**
-     * Restructure a flat repository to proper WordPress format
-     *
-     * @param string $source Source directory path.
-     * @param string $destination Destination directory path.
-     * @param string $slug Theme/plugin slug for the directory name.
-     * @param string $type Type of package ('theme' or 'plugin').
-     * @return string|WP_Error New source path or WP_Error on failure.
-     */
-    private function restructure_flat_repository($source, $destination, $slug, $type) {
-        global $wp_filesystem;
-
-        // Make sure we have access to the filesystem
-        if (!$wp_filesystem) {
-            require_once ABSPATH . 'wp-admin/includes/file.php';
-            WP_Filesystem();
-        }
-
-        // Log what we're doing
-        error_log('DD GitHub Updates: Checking if repository needs restructuring - Source: ' . $source . ', Destination: ' . $destination . ', Slug: ' . $slug . ', Type: ' . $type);
-
-        // Sanitize slug to ensure it's a valid directory name
-        $slug = sanitize_file_name($slug);
-        if (empty($slug)) {
-            $slug = 'github-' . ($type === 'theme' ? 'theme' : 'plugin');
-            error_log('DD GitHub Updates: Using fallback slug: ' . $slug);
-        }
-
-        // Check if repository is flat (no subdirectories containing the main files)
-        $is_flat = false;
-        $has_nested_structure = false;
-        $has_correct_structure = false;
-
-        // First, check for top-level directories
-        $files = $wp_filesystem->dirlist($source);
-        $directories = array();
-        $php_files = array();
-        $has_style_css = $wp_filesystem->exists($source . '/style.css');
-
-        // Log what we found in the source directory
-        error_log('DD GitHub Updates: Analyzing source directory structure:');
-        foreach ($files as $file => $file_data) {
-            $file_type = $file_data['type'] === 'd' ? 'directory' : 'file';
-            error_log('- ' . $file . ' (' . $file_type . ')');
-
-            if ($file_data['type'] === 'd') {
-                $directories[] = $file;
-            } elseif (pathinfo($file, PATHINFO_EXTENSION) === 'php') {
-                $php_files[] = $file;
-            }
-        }
-
-        // For themes, check for style.css in the root
-        if ($type === 'theme' && $has_style_css) {
-            $is_flat = true;
-            error_log('DD GitHub Updates: Found style.css in root - detected flat theme repository');
-        }
-
-        // For plugins, check for a PHP file with plugin headers in the root
-        if ($type === 'plugin' && !empty($php_files)) {
-            foreach ($php_files as $file) {
-                $file_path = $source . '/' . $file;
-                $file_content = $wp_filesystem->get_contents($file_path);
-
-                // Simple check for Plugin Name: header
-                if (strpos($file_content, 'Plugin Name:') !== false) {
-                    $is_flat = true;
-                    error_log('DD GitHub Updates: Found plugin header in root PHP file - detected flat plugin repository');
-                    break;
-                }
-            }
-        }
-
-        // Check for possible nested structure (WordPress standard)
-        if (!$is_flat && !empty($directories)) {
-            error_log('DD GitHub Updates: Checking for nested structure in subdirectories');
-
-            // Check if any subdirectory has the proper structure
-            foreach ($directories as $dir) {
-                $subdir_path = $source . '/' . $dir;
-
-                // For themes, check for style.css
-                if ($type === 'theme' && $wp_filesystem->exists($subdir_path . '/style.css')) {
-                    $has_nested_structure = true;
-                    error_log('DD GitHub Updates: Found theme structure in subdirectory: ' . $dir);
-
-                    // If this directory matches our slug, we've found the correct structure
-                    if ($dir === $slug) {
-                        $has_correct_structure = true;
-                        error_log('DD GitHub Updates: Found correct theme structure with matching slug: ' . $slug);
-                    }
-                }
-
-                // For plugins, check for PHP files with plugin headers
-                if ($type === 'plugin') {
-                    $subdir_files = $wp_filesystem->dirlist($subdir_path);
-                    foreach ($subdir_files as $file => $file_data) {
-                        if ($file_data['type'] === 'f' && pathinfo($file, PATHINFO_EXTENSION) === 'php') {
-                            $file_path = $subdir_path . '/' . $file;
-                            $file_content = $wp_filesystem->get_contents($file_path);
-
-                            if (strpos($file_content, 'Plugin Name:') !== false) {
-                                $has_nested_structure = true;
-                                error_log('DD GitHub Updates: Found plugin structure in subdirectory: ' . $dir);
-
-                                // If this directory matches our slug, we've found the correct structure
-                                if ($dir === $slug) {
-                                    $has_correct_structure = true;
-                                    error_log('DD GitHub Updates: Found correct plugin structure with matching slug: ' . $slug);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If repository has the correct structure already, return the source
-        if ($has_correct_structure) {
-            error_log('DD GitHub Updates: Repository already has correct structure with matching slug directory');
-            return $source;
-        }
-
-        // If repository has a nested structure but with wrong directory name, we should rename it
-        if ($has_nested_structure && !$has_correct_structure && count($directories) === 1) {
-            $existing_dir = $directories[0];
-            error_log('DD GitHub Updates: Repository has proper structure but directory name needs to be changed from ' . $existing_dir . ' to ' . $slug);
-
-            // Create a temporary working directory
-            $temp_dir = $destination . '-restructure-temp';
-            if (!$wp_filesystem->mkdir($temp_dir)) {
-                error_log('DD GitHub Updates: Failed to create temporary directory: ' . $temp_dir);
-                return new WP_Error('mkdir_failed', __('Could not create temporary directory for restructuring', 'dd-wp-github-updates'));
-            }
-
-            // Create proper subdirectory using the slug
-            $proper_dir = $temp_dir . '/' . $slug;
-            if (!$wp_filesystem->mkdir($proper_dir)) {
-                $wp_filesystem->rmdir($temp_dir, true);
-                error_log('DD GitHub Updates: Failed to create proper directory: ' . $proper_dir);
-                return new WP_Error('mkdir_failed', __('Could not create proper directory structure', 'dd-wp-github-updates'));
-            }
-
-            // Copy contents from the original directory to our properly named directory
-            $this->copy_dir($source . '/' . $existing_dir, $proper_dir);
-
-            // Remove the original source directory content
-            $wp_filesystem->rmdir($source, true);
-
-            // Move our restructured content to the original source location
-            $wp_filesystem->mkdir($source);
-            $this->copy_dir($temp_dir, $source);
-
-            // Clean up
-            $wp_filesystem->rmdir($temp_dir, true);
-
-            error_log('DD GitHub Updates: Successfully renamed directory to ' . $slug);
-            return $source;
-        }
-
-        // If not flat and no proper structure found, or if it is flat, restructure it
-        error_log('DD GitHub Updates: ' . ($is_flat ? 'Detected flat repository structure' : 'No proper structure found') . '. Restructuring...');
-
-        // Create a temporary working directory
-        $temp_dir = $destination . '-restructure-temp';
-        if (!$wp_filesystem->mkdir($temp_dir)) {
-            error_log('DD GitHub Updates: Failed to create temporary directory: ' . $temp_dir);
-            return new WP_Error('mkdir_failed', __('Could not create temporary directory for restructuring', 'dd-wp-github-updates'));
-        }
-
-        // Create proper subdirectory using the slug
-        $proper_dir = $temp_dir . '/' . $slug;
-        if (!$wp_filesystem->mkdir($proper_dir)) {
-            $wp_filesystem->rmdir($temp_dir, true);
-            error_log('DD GitHub Updates: Failed to create proper directory: ' . $proper_dir);
-            return new WP_Error('mkdir_failed', __('Could not create proper directory structure', 'dd-wp-github-updates'));
-        }
-
-        // List of WordPress-specific files to always include
-        $important_files = array(
-            'style.css',          // Theme main file
-            'functions.php',      // Theme functions
-            'index.php',          // Required for security
-            'screenshot.png',     // Theme screenshot
-            'readme.txt',         // WordPress readme
-        );
-
-        // Copy all relevant files to the new structure
-        $files = $wp_filesystem->dirlist($source, true, false);
-        foreach ($files as $file => $file_data) {
-            // Skip hidden directories and common VCS directories
-            if (strpos($file, '.') === 0 || in_array($file, array('.git', '.github', '.gitlab', '.svn', '.hg', 'node_modules', 'vendor'))) {
-                error_log('DD GitHub Updates: Skipping ' . $file);
-                continue;
-            }
-
-            // Always include important WordPress files, skip common GitHub files unless they're important
-            $should_include = !in_array($file, array('README.md', 'LICENSE', 'CHANGELOG.md', 'composer.json', 'package.json')) ||
-                              in_array($file, $important_files);
-
-            if ($should_include) {
-                $source_file = $source . '/' . $file;
-                $target_file = $proper_dir . '/' . $file;
-
-                error_log('DD GitHub Updates: Copying ' . $file . ' to new structure');
-
-                // Copy the file or directory
-                if ($file_data['type'] === 'd') {
-                    $wp_filesystem->mkdir($target_file);
-                    $this->copy_dir($source_file, $target_file);
-                } else {
-                    $wp_filesystem->copy($source_file, $target_file);
-                }
-            } else {
-                error_log('DD GitHub Updates: Skipping non-essential file: ' . $file);
-            }
-        }
-
-        // Remove the original source directory content
-        $wp_filesystem->rmdir($source, true);
-
-        // Move our restructured content to the original source location
-        $wp_filesystem->mkdir($source);
-        $this->copy_dir($temp_dir, $source);
-
-        // Clean up
-        $wp_filesystem->rmdir($temp_dir, true);
-
-        error_log('DD GitHub Updates: Successfully restructured repository for WordPress compatibility');
-
-        // Verify the restructured directory exists
-        if (!$wp_filesystem->exists($source . '/' . $slug)) {
-            error_log('DD GitHub Updates: WARNING - Restructuring may have failed, cannot find: ' . $source . '/' . $slug);
-        } else {
-            error_log('DD GitHub Updates: Verified restructured directory exists: ' . $source . '/' . $slug);
-        }
-
+    public function maybe_restructure_github_package($source, $remote_source, $upgrader, $args = array()) {
+        // We'll keep this simplified and let it pass through
+        // Our new installation method doesn't rely on this
         return $source;
-    }
-
-    /**
-     * Helper function to copy a directory recursively
-     *
-     * @param string $source Source directory.
-     * @param string $destination Destination directory.
-     * @return bool Success or failure.
-     */
-    private function copy_dir($source, $destination) {
-        global $wp_filesystem;
-
-        $files = $wp_filesystem->dirlist($source, true, true);
-
-        foreach ($files as $file => $file_data) {
-            $source_file = $source . '/' . $file;
-            $target_file = $destination . '/' . $file;
-
-            if ($file_data['type'] === 'd') {
-                $wp_filesystem->mkdir($target_file);
-                $this->copy_dir($source_file, $target_file);
-            } else {
-                $wp_filesystem->copy($source_file, $target_file);
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * Recursively copy a directory
-     *
-     * @param string $source Source directory
-     * @param string $dest Destination directory
-     */
-    private function recursive_copy($source, $dest) {
-        wp_mkdir_p($dest);
-        $dir_handle = opendir($source);
-        while ($file = readdir($dir_handle)) {
-            if ($file != '.' && $file != '..') {
-                $src = $source . '/' . $file;
-                $dst = $dest . '/' . $file;
-                if (is_dir($src)) {
-                    $this->recursive_copy($src, $dst);
-                } else {
-                    copy($src, $dst);
-                }
-            }
-        }
-        closedir($dir_handle);
-    }
-
-    /**
-     * Recursively delete a directory
-     *
-     * @param string $dir Directory to delete
-     */
-    private function recursive_rmdir($dir) {
-        if (is_dir($dir)) {
-            $objects = scandir($dir);
-            foreach ($objects as $object) {
-                if ($object != '.' && $object != '..') {
-                    if (is_dir($dir . '/' . $object)) {
-                        $this->recursive_rmdir($dir . '/' . $object);
-                    } else {
-                        unlink($dir . '/' . $object);
-                    }
-                }
-            }
-            rmdir($dir);
-        }
-    }
-
-    /**
-     * Add a directory to a ZIP file
-     *
-     * @param ZipArchive $zip ZIP archive object
-     * @param string $dir Directory to add
-     * @param string $zip_dir Directory name in the ZIP file
-     */
-    private function add_dir_to_zip($zip, $dir, $zip_dir) {
-        if (is_dir($dir)) {
-            $zip->addEmptyDir($zip_dir);
-            $objects = scandir($dir);
-            foreach ($objects as $object) {
-                if ($object != '.' && $object != '..') {
-                    if (is_dir($dir . '/' . $object)) {
-                        $this->add_dir_to_zip($zip, $dir . '/' . $object, $zip_dir . '/' . $object);
-                    } else {
-                        $zip->addFile($dir . '/' . $object, $zip_dir . '/' . $object);
-                    }
-                }
-            }
-        }
     }
 
     /**
@@ -1432,121 +624,43 @@ class DD_GitHub_Installer {
     }
 
     /**
-     * Filter to check and restructure flat GitHub repositories
+     * Safely remove empty directory and clean up
      *
-     * @param string $source        File source location.
-     * @param string $remote_source Remote file source location.
-     * @param WP_Upgrader $upgrader   WP_Upgrader instance.
-     * @param array $args           Extra arguments.
-     * @return string|WP_Error      Modified source or WP_Error.
+     * @param string $directory Directory path to clean up
+     * @return bool True if cleanup successful or directory didn't exist
      */
-    public function maybe_restructure_github_package($source, $remote_source, $upgrader, $args = array()) {
-        // Check if this is a valid source path
-        if (!is_dir($source) || empty($source)) {
-            error_log('DD GitHub Updates: Invalid source directory - ' . $source);
-            return $source;
+    private function cleanup_empty_directory($directory) {
+        global $wp_filesystem;
+
+        if (!$wp_filesystem->exists($directory)) {
+            return true;
         }
 
-        // Enhanced detection for GitHub sources
-        $is_github_source = false;
-        $source_dir_name = basename($source);
-
-        // Check for common GitHub naming patterns
-        if (preg_match('/-[0-9a-f]{7,}$/', $source_dir_name) ||
-            strpos($source_dir_name, '-master') !== false ||
-            strpos($source_dir_name, '-main') !== false ||
-            strpos($source_dir_name, '-v') !== false ||
-            preg_match('/^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+(-[a-zA-Z0-9_.-]+)?$/', $source_dir_name)) {
-            $is_github_source = true;
-            error_log('DD GitHub Updates: Detected GitHub source based on directory name pattern: ' . $source_dir_name);
+        // Check if directory has contents
+        $dir_contents = $wp_filesystem->dirlist($directory);
+        if (empty($dir_contents)) {
+            // Directory is empty, safe to remove
+            return $wp_filesystem->rmdir($directory);
         }
 
-        // Process our plugin's updates or general GitHub pattern directories
-        if ((isset($args['github_update']) && $args['github_update'] === true) || $is_github_source) {
-            // Get type and slug from the args
-            $type = isset($args['type']) ? $args['type'] : '';
-            $slug = isset($args['slug']) ? $args['slug'] : '';
+        // Check if only hidden files exist
+        $visible_contents = array_filter($dir_contents, function($item) {
+            return substr($item['name'], 0, 1) !== '.';
+        });
 
-            // If no type provided, try to determine from upgrader
-            if (empty($type)) {
-                if (isset($args['type'])) {
-                    $type = $args['type'];
-                } elseif (isset($upgrader->skin->options['type'])) {
-                    $type = $upgrader->skin->options['type'];
-                } elseif (is_a($upgrader, 'Theme_Upgrader')) {
-                    $type = 'theme';
-                    error_log('DD GitHub Updates: Detected Theme_Upgrader');
-                } elseif (is_a($upgrader, 'Plugin_Upgrader')) {
-                    $type = 'plugin';
-                    error_log('DD GitHub Updates: Detected Plugin_Upgrader');
-                }
-            }
-
-            // Try to determine type by checking for key files
-            if (empty($type)) {
-                if (file_exists($source . '/style.css')) {
-                    $type = 'theme';
-                    error_log('DD GitHub Updates: Detected theme based on style.css file');
+        if (empty($visible_contents)) {
+            // Only hidden files, remove them and the directory
+            foreach ($dir_contents as $item) {
+                $item_path = trailingslashit($directory) . $item['name'];
+                if ($item['type'] === 'd') {
+                    $wp_filesystem->rmdir($item_path, true);
                 } else {
-                    // Check if any PHP files have plugin headers
-                    $files = glob($source . '/*.php');
-                    foreach ($files as $file) {
-                        $file_data = get_file_data($file, array('Name' => 'Plugin Name'));
-                        if (!empty($file_data['Name'])) {
-                            $type = 'plugin';
-                            error_log('DD GitHub Updates: Detected plugin based on plugin header in ' . basename($file));
-                            break;
-                        }
-                    }
+                    $wp_filesystem->delete($item_path);
                 }
             }
-
-            // If no slug provided, try to extract from the source
-            if (empty($slug)) {
-                // Get the directory name from source as a fallback
-                $slug = $source_dir_name;
-
-                // Clean up the slug if it's from a GitHub release
-                $slug = preg_replace('/-[0-9a-f]{7,}$/', '', $slug); // Remove commit hash if present
-                $slug = preg_replace('/-v?\d+(\.\d+)*$/', '', $slug); // Remove version number if present
-                $slug = preg_replace('/(-master|-main)$/', '', $slug); // Remove branch names
-
-                // If there's a dot in the slug (owner.repo), take just the repo part
-                if (strpos($slug, '.') !== false) {
-                    $parts = explode('.', $slug);
-                    $slug = end($parts);
-                }
-
-                // If there's still a dash, try to extract meaningful part
-                if (strpos($slug, '-') !== false) {
-                    // Try to get just the repo name without the owner
-                    $parts = explode('-', $slug);
-                    if (count($parts) >= 2) {
-                        // Take the last part, which is likely the repo name
-                        $potential_slug = end($parts);
-                        // Only use it if it's not just a version/branch indicator
-                        if (!in_array($potential_slug, array('master', 'main')) && !preg_match('/^v?\d+(\.\d+)*$/', $potential_slug)) {
-                            $slug = $potential_slug;
-                        } else {
-                            // Otherwise use everything except owner/first part
-                            array_shift($parts);
-                            $slug = implode('-', $parts);
-                        }
-                    }
-                }
-
-                // Sanitize the slug
-                $slug = sanitize_file_name($slug);
-                error_log('DD GitHub Updates: Determined slug: ' . $slug);
-            }
-
-            // Log the detection
-            error_log('DD GitHub Updates: Detected potential GitHub package, checking if restructuring is needed. Type: ' . $type . ', Slug: ' . $slug);
-
-            // Restructure the package
-            return $this->restructure_flat_repository($source, $remote_source, $slug, $type);
+            return $wp_filesystem->rmdir($directory);
         }
 
-        return $source;
+        return false; // Directory has visible contents
     }
 }

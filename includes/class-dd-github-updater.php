@@ -38,6 +38,19 @@ class DD_GitHub_Updater {
     }
 
     /**
+     * Register hooks for updater functionality
+     */
+    public function register_hooks() {
+        // Add filters for theme and plugin updates
+        add_filter('pre_set_site_transient_update_themes', array($this, 'check_theme_updates'));
+        add_filter('pre_set_site_transient_update_plugins', array($this, 'check_plugin_updates'));
+
+        // Add filters for plugin and theme information
+        add_filter('plugins_api', array($this, 'plugins_api_filter'), 10, 3);
+        add_filter('themes_api', array($this, 'themes_api_filter'), 10, 3);
+    }
+
+    /**
      * Load repositories configuration from options
      */
     private function load_repositories() {

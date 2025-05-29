@@ -280,11 +280,21 @@
             installForm.addEventListener('submit', function(e) {
                 e.preventDefault();
 
-                const type = document.getElementById('install_type').value;
                 const owner = document.getElementById('install_owner').value;
                 const name = document.getElementById('install_name').value;
+                const type = document.getElementById('install_type').value;
                 const downloadUrl = document.getElementById('install_download_url').value;
                 const addToUpdater = document.getElementById('add_to_updater').checked;
+
+                let activate = false;
+                let slug = '';
+
+                if (type === 'theme') {
+                    slug = document.getElementById('theme_slug').value;
+                    activate = document.getElementById('activate_theme').checked;
+                } else if (type === 'plugin') {
+                    activate = document.getElementById('activate_plugin').checked;
+                }
 
                 if (!type || !owner || !name) {
                     alert('Missing required installation parameters.');
@@ -310,20 +320,29 @@
 
                 // Add type-specific parameters
                 if (type === 'theme') {
-                    formData.append('slug', document.getElementById('theme_slug').value);
-                    formData.append('activate', document.getElementById('activate_theme').checked);
+                    formData.append('slug', slug);
+                    formData.append('activate', activate);
                 } else if (type === 'plugin') {
-                    formData.append('activate', document.getElementById('activate_plugin').checked);
+                    formData.append('activate', activate);
                 }
 
                 fetch(dd_github_updates.ajax_url, {
                     method: 'POST',
                     body: formData
                 })
-                .then(response => response.json())
-                .then(response => {
+                .then(response => response.json())                .then(response => {
                     if (response.success) {
-                        statusEl.innerHTML = '<span class="success">' + response.data + '</span>';
+                        // Handle success response - extract message from data object
+                        let message = '';
+                        if (typeof response.data === 'object' && response.data.message) {
+                            message = response.data.message;
+                        } else if (typeof response.data === 'string') {
+                            message = response.data;
+                        } else {
+                            message = dd_github_updates.install_success;
+                        }
+
+                        statusEl.innerHTML = '<span class="success">' + message + '</span>';
 
                         // If we've added to updater, reload to show in list
                         if (addToUpdater) {

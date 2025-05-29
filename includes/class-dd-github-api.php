@@ -30,6 +30,13 @@ class DD_GitHub_API {
     private $access_token;
 
     /**
+     * API request rate limiting information
+     *
+     * @var array
+     */
+    private $rate_limit_info = array();
+
+    /**
      * Constructor
      */
     public function __construct() {
@@ -82,6 +89,13 @@ class DD_GitHub_API {
         // Log response code
         error_log('GitHub API Response Code: ' . $response_code);
 
+        // Store rate limiting information from headers
+        $this->rate_limit_info = array(
+            'limit' => wp_remote_retrieve_header($response, 'X-RateLimit-Limit'),
+            'remaining' => wp_remote_retrieve_header($response, 'X-RateLimit-Remaining'),
+            'reset' => wp_remote_retrieve_header($response, 'X-RateLimit-Reset'),
+        );
+
         if ($response_code !== 200) {
             $error_data = json_decode($body, true);
             $error_message = isset($error_data['message']) ? $error_data['message'] : $response_message;
@@ -113,6 +127,15 @@ class DD_GitHub_API {
         }
 
         return $data;
+    }
+
+    /**
+     * Get rate limit information
+     *
+     * @return array Rate limit information
+     */
+    public function get_rate_limit_info() {
+        return $this->rate_limit_info;
     }
 
     /**
@@ -258,30 +281,26 @@ class DD_GitHub_API {
                         return $asset['browser_download_url'];
                     }
                 }
-            }            // If no suitable assets, use the zipball_url
+            }
+
+            // If no suitable assets, use the zipball_url
             if (!empty($release['zipball_url'])) {
                 // For API URLs, ensure we're using the correct URL format
                 $zipball_url = $release['zipball_url'];
 
-                // If using the GitHub API, append .zip to the URL to ensure we get a proper ZIP archive
-                if (strpos($zipball_url, 'api.github.com') !== false && strpos($zipball_url, '.zip') === false) {
-                    // Convert API URL to direct GitHub URL
-                    $zipball_url = str_replace(
-                        'api.github.com/repos/',
-                        'github.com/',
-                        $zipball_url
-                    );
+                // Check if we're using GitHub API URL
+                if (strpos($zipball_url, 'api.github.com') !== false) {
+                    // Convert to a proper direct download URL that works more reliably
+                    if (!empty($release['tag_name'])) {
+                        $download_url = sprintf('https://github.com/%s/%s/archive/refs/tags/%s.zip',
+                            $owner,
+                            $repo,
+                            $release['tag_name']
+                        );
 
-                    // Ensure we have the correct path structure for a download
-                    if (strpos($zipball_url, '/zipball/') !== false) {
-                        $zipball_url = str_replace(
-                            '/zipball/',
-                            '/archive/refs/tags/',
-                            $zipball_url
-                        ) . '.zip';
+                        error_log('Converted API zipball URL to direct GitHub URL: ' . $download_url);
+                        return $download_url;
                     }
-
-                    error_log('Converted API zipball URL to direct GitHub URL: ' . $zipball_url);
                 }
 
                 return $zipball_url;
@@ -323,149 +342,148 @@ class DD_GitHub_API {
         }
 
         return $download_url;
-    }    /**
+    }
+
+    /**
      * Download and verify a file from GitHub
      *
      * @param string $url URL to download.
      * @return string|WP_Error Path to downloaded file or WP_Error on failure.
      */
     public function download_file($url) {
-        // For GitHub API URLs, we need to properly handle authentication and follow redirects
-        $is_github_api = strpos($url, 'api.github.com') !== false;
-        $is_github_url = strpos($url, 'github.com') !== false;
+        // Debug the URL we're trying to download
+        error_log('Attempting to download file from URL: ' . $url);
 
-        // Log what we're downloading (without exposing sensitive tokens)
-        error_log('Downloading file from: ' . preg_replace('/([?&]access_token)=[^&]+/', '$1=REDACTED', $url));
+        // For GitHub URLs, we'll use WordPress download_url function
+        // which is more reliable for handling larger files
+        require_once ABSPATH . 'wp-admin/includes/file.php';
 
-        // Prepare headers with proper authentication
-        $headers = array(
-            'User-Agent' => 'WordPress/' . get_bloginfo('version') . '; ' . get_bloginfo('url'),
-        );
+        // Download the file
+        $temp_file = download_url($url);
 
-        // Add authorization header if token is available
-        if (!empty($this->access_token) && ($is_github_api || $is_github_url)) {
-            $headers['Authorization'] = 'Bearer ' . $this->access_token;
-
-            // For API URLs, also set the Accept header to ensure we get the right content
-            if ($is_github_api) {
-                $headers['Accept'] = 'application/octet-stream';
-            }
-        }
-
-        // If it's a GitHub API URL, first make a request to get the redirect URL
-        if ($is_github_api) {
-            error_log('GitHub API URL detected, resolving download URL first');
-
-            // Make a HEAD request to get the actual download location
-            $head_response = wp_remote_head($url, array(
-                'headers' => $headers,
-                'timeout' => 30,
-                'redirection' => 5, // Follow up to 5 redirects
-            ));
-
-            if (is_wp_error($head_response)) {
-                error_log('Failed to resolve download URL: ' . $head_response->get_error_message());
-                return $head_response;
-            }
-
-            $response_code = wp_remote_retrieve_response_code($head_response);
-
-            // If we got a redirect, use the Location header
-            if ($response_code >= 300 && $response_code < 400) {
-                $redirect_url = wp_remote_retrieve_header($head_response, 'location');
-                if (!empty($redirect_url)) {
-                    error_log('Following redirect to: ' . $redirect_url);
-                    $url = $redirect_url;
-
-                    // If redirected to github.com (not API), we don't need the specific headers anymore
-                    if (strpos($url, 'api.github.com') === false) {
-                        if (isset($headers['Accept'])) {
-                            unset($headers['Accept']);
-                        }
-                    }
-                }
-            } else if ($response_code !== 200) {
-                error_log('GitHub API returned unexpected status code: ' . $response_code);
-                return new WP_Error('github_api_error', 'GitHub API returned status code: ' . $response_code);
-            }
-        }
-
-        // Create a temporary file
-        $temp_filename = get_temp_dir() . uniqid('github_download_') . '.zip';
-
-        // Use wp_remote_get with stream option to download the file directly
-        $response = wp_remote_get($url, array(
-            'timeout' => 300, // Longer timeout for larger files
-            'stream' => true,
-            'filename' => $temp_filename,
-            'headers' => $headers,
-            'redirection' => 5, // Follow up to 5 redirects
-            'sslverify' => true,
-        ));
-
-        // Check if the request was successful
-        if (is_wp_error($response)) {
-            error_log('Download failed: ' . $response->get_error_message());
-
-            // Retry the download with a different method if the first attempt failed
-            error_log('Retrying download with alternative method...');
-
-            // Create a context with the headers
-            $context_options = array(
-                'http' => array(
-                    'method' => 'GET',
-                    'header' => implode("\r\n", array_map(
-                        function($k, $v) { return "$k: $v"; },
-                        array_keys($headers),
-                        array_values($headers)
-                    )),
-                    'timeout' => 300,
-                    'follow_location' => true,
-                    'max_redirects' => 5,
-                ),
-                'ssl' => array(
-                    'verify_peer' => true,
-                    'verify_peer_name' => true,
-                )
-            );
-
-            $context = stream_context_create($context_options);
-
-            // Try to download with PHP's file_get_contents
-            $content = @file_get_contents($url, false, $context);
-            if ($content === false) {
-                error_log('Alternative download method also failed');
-                return $response; // Return the original error
-            }
-
-            // Save the content to the temporary file
-            if (file_put_contents($temp_filename, $content) === false) {
-                error_log('Failed to save downloaded content to file');
-                return new WP_Error('save_failed', 'Failed to save downloaded content to file');
-            }
-        } else {
-            // Check response code
-            $response_code = wp_remote_retrieve_response_code($response);
-            if ($response_code !== 200) {
-                error_log('Download failed with response code: ' . $response_code);
-                return new WP_Error('download_failed', 'Failed to download file, server returned code ' . $response_code);
-            }
+        // Check if download was successful
+        if (is_wp_error($temp_file)) {
+            error_log('Download failed: ' . $temp_file->get_error_message());
+            return $temp_file;
         }
 
         // Verify the file exists and has content
-        if (!file_exists($temp_filename) || filesize($temp_filename) < 100) {
-            error_log('Downloaded file not found or too small: ' . $temp_filename . ' Size: ' . (file_exists($temp_filename) ? filesize($temp_filename) : 0));
+        if (!file_exists($temp_file) || filesize($temp_file) < 100) {
+            error_log('Downloaded file not found or too small: ' . $temp_file . ' Size: ' . (file_exists($temp_file) ? filesize($temp_file) : 0));
             return new WP_Error('download_failed', 'Downloaded file not found or is invalid');
         }
 
         // Verify it's a valid ZIP file
-        if (!$this->is_valid_zip($temp_filename)) {
+        if (!$this->is_valid_zip($temp_file)) {
             error_log('Downloaded file is not a valid ZIP archive');
             return new WP_Error('invalid_zip', 'Downloaded file is not a valid ZIP archive');
         }
 
-        error_log('File downloaded successfully to: ' . $temp_filename . ' Size: ' . filesize($temp_filename) . ' bytes');
-        return $temp_filename;
+        error_log('File downloaded successfully to: ' . $temp_file . ' Size: ' . filesize($temp_file) . ' bytes');
+        return $temp_file;
+    }
+
+    /**
+     * Download and verify a file from GitHub with authentication
+     *
+     * @param string $url URL to download.
+     * @return string|WP_Error Path to downloaded file or WP_Error on failure.
+     */
+    public function download_file_authenticated($url) {
+        // Debug the URL we're trying to download
+        error_log('Attempting to download file from URL with authentication: ' . $url);
+
+        // Include required WordPress file handling functions
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+
+        // Prepare download arguments with authentication
+        $args = array(
+            'headers' => array(
+                'Accept'        => 'application/vnd.github.v3+json',
+                'User-Agent'    => 'WordPress/' . get_bloginfo('version') . '; ' . get_bloginfo('url'),
+            ),
+            'timeout' => 60, // Increase timeout for large files
+            'sslverify' => true,
+        );
+
+        // Add authentication if token is available
+        if (!empty($this->access_token)) {
+            $args['headers']['Authorization'] = 'Bearer ' . $this->access_token;
+            error_log('GitHub Download: Using authenticated request');
+        } else {
+            error_log('GitHub Download: No authentication token available');
+        }
+
+        // Use wp_remote_get for authenticated downloads
+        $response = wp_remote_get($url, $args);
+
+        // Check for errors
+        if (is_wp_error($response)) {
+            error_log('GitHub Download Error: ' . $response->get_error_message());
+            return $response;
+        }
+
+        // Get response code and body
+        $response_code = wp_remote_retrieve_response_code($response);
+        $response_message = wp_remote_retrieve_response_message($response);
+        $body = wp_remote_retrieve_body($response);
+
+        error_log('GitHub Download Response Code: ' . $response_code);
+
+        if ($response_code !== 200) {
+            $error_message = $response_message;
+
+            // Provide more specific error messages
+            if ($response_code === 404) {
+                $error_message = 'Repository or release not found. Check if the repository exists and is accessible.';
+            } elseif ($response_code === 401 || $response_code === 403) {
+                $error_message = 'Access denied. Your GitHub token may be invalid or missing required permissions.';
+            }
+
+            error_log('GitHub Download Error: ' . $error_message . ' (HTTP ' . $response_code . ')');
+
+            return new WP_Error(
+                'github_download_error',
+                sprintf('GitHub download failed (HTTP %d): %s', $response_code, $error_message),
+                array(
+                    'response' => $response,
+                    'code' => $response_code,
+                    'url' => $url
+                )
+            );
+        }
+
+        // Check if we have content
+        if (empty($body)) {
+            error_log('GitHub Download Error: Empty response body');
+            return new WP_Error('github_download_error', 'Empty response from GitHub');
+        }
+
+        // Create a temporary file
+        $temp_file = wp_tempnam();
+        if (!$temp_file) {
+            error_log('GitHub Download Error: Could not create temporary file');
+            return new WP_Error('temp_file_error', 'Could not create temporary file');
+        }
+
+        // Write the content to the temporary file
+        $bytes_written = file_put_contents($temp_file, $body);
+        if ($bytes_written === false) {
+            @unlink($temp_file);
+            error_log('GitHub Download Error: Could not write to temporary file');
+            return new WP_Error('file_write_error', 'Could not write to temporary file');
+        }
+
+        error_log('GitHub Download: Successfully downloaded ' . $bytes_written . ' bytes to: ' . $temp_file);
+
+        // Verify it's a valid ZIP file
+        if (!$this->is_valid_zip($temp_file)) {
+            @unlink($temp_file);
+            error_log('GitHub Download Error: Downloaded file is not a valid ZIP archive');
+            return new WP_Error('invalid_zip', 'Downloaded file is not a valid ZIP archive');
+        }
+
+        return $temp_file;
     }
 
     /**
@@ -521,5 +539,34 @@ class DD_GitHub_API {
                  ' (Signature: ' . bin2hex($signature) . ', Expected: 504b0304)');
 
         return $result;
+    }
+
+    /**
+     * Check if a GitHub URL likely requires authentication
+     *
+     * @param string $url The GitHub URL to check
+     * @return bool True if authentication is likely required
+     */
+    public function url_requires_auth($url) {
+        // If we have no token, we can't authenticate anyway
+        if (empty($this->access_token)) {
+            return false;
+        }
+
+        // GitHub URLs that typically require authentication:
+        // - api.github.com URLs (zipball/tarball)
+        // - Private repository archive URLs
+        if (strpos($url, 'api.github.com') !== false) {
+            return true;
+        }
+
+        // For direct GitHub archive URLs, we can't easily determine
+        // if the repository is private without making a request
+        // So we'll always use authentication if we have a token
+        if (strpos($url, 'github.com') !== false && strpos($url, '/archive/') !== false) {
+            return true;
+        }
+
+        return false;
     }
 }

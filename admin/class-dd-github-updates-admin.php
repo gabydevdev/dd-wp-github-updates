@@ -19,6 +19,14 @@ class DD_GitHub_Updates_Admin {
      * Constructor
      */
     public function __construct() {
+        // Keep the constructor empty or with minimal initialization
+        // Move hook registration to the register_hooks method
+    }
+
+    /**
+     * Register hooks for admin functionality
+     */
+    public function register_hooks() {
         add_action('admin_menu', array($this, 'add_admin_menu'));
         add_action('admin_init', array($this, 'register_settings'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_assets'));
@@ -107,7 +115,19 @@ class DD_GitHub_Updates_Admin {
         $sanitized = array();
 
         if (isset($input['github_token'])) {
-            $sanitized['github_token'] = sanitize_text_field($input['github_token']);
+            // More thorough sanitization for API tokens
+            $token = sanitize_text_field($input['github_token']);
+
+            // Validate token format (GitHub tokens are 40 hex chars)
+            if (!empty($token) && (!preg_match('/^[a-f0-9]{40}$/i', $token) && !preg_match('/^ghp_[a-zA-Z0-9]{36}$/', $token))) {
+                add_settings_error(
+                    'dd_github_updates_settings',
+                    'invalid_token',
+                    __('The GitHub token format appears to be invalid.', 'dd-wp-github-updates')
+                );
+            }
+
+            $sanitized['github_token'] = $token;
         }
 
         return $sanitized;
