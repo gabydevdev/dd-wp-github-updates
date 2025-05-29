@@ -3,19 +3,19 @@
  * DD WP GitHub Updates
  *
  * @package           DD_WP_GitHub_Updates
- * @author            Your Name
- * @copyright         2023 Your Name or Company
+ * @author            gabydevdev
+ * @copyright         2023
  * @license           GPL-2.0-or-later
  *
  * @wordpress-plugin
  * Plugin Name:       DD WP GitHub Updates
- * Plugin URI:        https://example.com/plugins/dd-wp-github-updates
- * Description:       Update WordPress themes and plugins from private GitHub repositories.
+ * Plugin URI:        https://github.com/gabydevdev/dd-wp-github-updates
+ * Description:       Update and install WordPress themes or plugins from your own private GitHub repositories.
  * Version:           1.0.0
  * Requires at least: 5.2
  * Requires PHP:      7.2
- * Author:            Your Name
- * Author URI:        https://example.com
+ * Author:            gabydevdev
+ * Author URI:        https://github.com/gabydevdev
  * Text Domain:       dd-wp-github-updates
  * License:           GPL v2 or later
  * License URI:       http://www.gnu.org/licenses/gpl-2.0.txt
