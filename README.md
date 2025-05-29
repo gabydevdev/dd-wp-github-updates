@@ -82,31 +82,6 @@ To use this plugin, you'll need a GitHub personal access token:
    - Add to updater list for future updates
 6. Click "Install Now"
 
-## Repository Structure Requirements
-
-### For Themes
-
-Your theme repository should have the standard WordPress theme structure:
-```
-your-theme/
-├── style.css (required - with theme header)
-├── index.php (required)
-├── functions.php
-├── screenshot.png
-└── other theme files...
-```
-
-### For Plugins
-
-Your plugin repository should have the standard WordPress plugin structure:
-```
-your-plugin/
-├── your-plugin.php (main plugin file with plugin header)
-├── includes/
-├── admin/
-└── other plugin files...
-```
-
 ## Release Management
 
 ### Creating Releases
@@ -215,16 +190,6 @@ Ensure your server supports:
 - **File Permissions**: Ensure proper WordPress file permissions are maintained
 - **SSL Verification**: The plugin enforces SSL certificate verification for all GitHub API requests
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/new-feature`
-3. Make your changes and test thoroughly
-4. Follow WordPress coding standards
-5. Commit your changes: `git commit -am 'Add new feature'`
-6. Push to the branch: `git push origin feature/new-feature`
-7. Submit a pull request
-
 ### Development Setup
 
 ```bash
@@ -261,11 +226,6 @@ the Free Software Foundation; either version 2 of the License, or
 
 - **Documentation**: Check this README and inline code comments
 - **Issues**: Report bugs on the GitHub repository
-- **WordPress Forums**: Post general questions in WordPress support forums
-
-## Credits
-
-Developed by [gabydevdev](https://github.com/gabydevdev)
 
 ---
 
